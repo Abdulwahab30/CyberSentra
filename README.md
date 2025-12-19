@@ -116,6 +116,7 @@ CyberSentra
     ├── MlAnomalyRepository
     └── ThreatRepository
 
+```
 ## 🗄️ Database (SQLite)
 
 Tables
