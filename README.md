@@ -171,7 +171,7 @@ LiveChartsCore
 
 Windows Event Log API
 
-##🚀 Getting Started
+## 🚀 Getting Started
 Prerequisites
 
 Windows (required for live Event Log ingestion)
@@ -180,7 +180,7 @@ Windows (required for live Event Log ingestion)
 
 Optional: Sysmon installed
 
-##📌 Notes
+## 📌 Notes
 
 Security log access is permission-aware and best-effort
 
