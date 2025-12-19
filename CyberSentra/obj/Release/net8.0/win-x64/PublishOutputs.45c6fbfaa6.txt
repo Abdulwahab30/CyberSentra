@@ -1,0 +1,4 @@
+C:\Users\mk454\Downloads\CyberSentra\CyberSentra\bin\Release\net8.0\win-x64\publish\CyberSentra.pdb
+C:\Users\mk454\Downloads\CyberSentra\CyberSentra\bin\Release\net8.0\win-x64\publish\data\events.json
+C:\Users\mk454\Downloads\CyberSentra\CyberSentra\bin\Release\net8.0\win-x64\publish\libSkiaSharp.pdb
+C:\Users\mk454\Downloads\CyberSentra\CyberSentra\bin\Release\net8.0\win-x64\publish\CyberSentra.exe
