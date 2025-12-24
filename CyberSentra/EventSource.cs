@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Diagnostics.Eventing.Reader;
+using System.Text.RegularExpressions;
 
 namespace CyberSentra
 {
@@ -43,6 +44,15 @@ namespace CyberSentra
             {
                 Debug.WriteLine("[DB] SaveEvents failed: " + ex.Message);
             }
+        }
+
+        private static string ExtractSysmonField(string text, string fieldName)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "";
+            // Sysmon descriptions typically have lines like: "Image: C:\...\cmd.exe"
+            var rx = new Regex(@"(?mi)^\s*" + Regex.Escape(fieldName) + @"\s*:\s*(.+)\s*$");
+            var m = rx.Match(text);
+            return m.Success ? m.Groups[1].Value.Trim() : "";
         }
 
 
@@ -135,14 +145,17 @@ namespace CyberSentra
                         var record = new EventRecord
                         {
                             Time = entry.TimeGenerated.ToString("o"),
-
-                            Type = isSysmon ? "Sysmon" : logName,            // "Sysmon" or original log
-                            Severity = entry.EntryType.ToString(),           // Information, Warning, Error, etc.
+                            Type = isSysmon ? "Sysmon" : logName,
+                            Severity = entry.EntryType.ToString(),
                             User = entry.UserName ?? string.Empty,
-                            Process = entry.Source,                          // Sysmon: "Microsoft-Windows-Sysmon"
+                            Process = entry.Source ?? string.Empty,
                             Details = entry.Message ?? string.Empty,
-                            Source = isSysmon ? "Sysmon" : "Windows"
+                            Source = isSysmon ? "Sysmon" : "Windows",
+
+                            // ✅ Event ID (lower 16 bits for classic logs)
+                            EventId = unchecked((int)(entry.InstanceId & 0xFFFF))
                         };
+
 
                         results.Add(record);
                     }
@@ -175,8 +188,19 @@ namespace CyberSentra
                         User = ev.UserId?.ToString() ?? "",
                         Process = ev.ProviderName ?? "Microsoft-Windows-Sysmon",
                         Details = ev.FormatDescription() ?? "",
-                        Source = "Sysmon"
+                        Source = "Sysmon",
+
+                        // ✅ EventId exists here!
+                        EventId = ev.Id,
+
+                        // ✅ Parse common Sysmon fields from description text
+                        Image = ExtractSysmonField(ev.FormatDescription() ?? "", "Image"),
+                        CommandLine = ExtractSysmonField(ev.FormatDescription() ?? "", "CommandLine"),
+                        ParentImage = ExtractSysmonField(ev.FormatDescription() ?? "", "ParentImage"),
+                        DestinationIp = ExtractSysmonField(ev.FormatDescription() ?? "", "DestinationIp"),
+                        DestinationPort = ExtractSysmonField(ev.FormatDescription() ?? "", "DestinationPort"),
                     });
+
 
                     ev.Dispose();
                 }

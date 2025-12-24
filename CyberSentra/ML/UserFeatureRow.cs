@@ -13,9 +13,10 @@ namespace CyberSentra.ML
         public string User { get; set; } = "Unknown";
 
         // Must be fixed-length for ML.NET
-      
-        [VectorType(6)]
-        public float[] Features { get; set; } = new float[6];
+
+        [VectorType(12)]
+        public float[] Features { get; set; } = new float[12];
+
 
     }
 

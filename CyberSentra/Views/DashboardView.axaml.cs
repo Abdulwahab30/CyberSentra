@@ -167,10 +167,14 @@ namespace CyberSentra
         }
 
         // Timer for near real-time refresh
-        // private readonly DispatcherTimer _timer;
+        private readonly DispatcherTimer _timer;
 
         // Recent anomalies list for DataGrid
         public ObservableCollection<AnomalyItem> RecentAnomalies { get; } = new();
+
+        private DateTime _lastMlRunUtc = DateTime.MinValue;
+        private readonly TimeSpan _mlInterval = TimeSpan.FromSeconds(90);
+
 
         public DashboardView()
         {
@@ -183,12 +187,12 @@ namespace CyberSentra
             LoadRecentAnomalies();
             // Use the view itself as DataContext since you don't use MVVM
             DataContext = this;
-            //_timer = new DispatcherTimer
-            //{
-            //    Interval = TimeSpan.FromSeconds(10) // change interval if needed
-            //};
-            //_timer.Tick += Timer_Tick;
-            //_timer.Start();
+            _timer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(15) // change interval if needed
+            };
+            _timer.Tick += Timer_Tick;
+            _timer.Start();
 
         }
 
@@ -238,7 +242,22 @@ namespace CyberSentra
                 }
             }
         }
+        private static float[] ComputeMean(List<UserFeatureRow> rows)
+        {
+            if (rows.Count == 0) return Array.Empty<float>();
 
+            int d = rows[0].Features.Length;
+            var mean = new float[d];
+
+            foreach (var r in rows)
+                for (int i = 0; i < d; i++)
+                    mean[i] += r.Features[i];
+
+            for (int i = 0; i < d; i++)
+                mean[i] /= rows.Count;
+
+            return mean;
+        }
         private void InitFromEvents()
         {
             var events = EventContext.GetCurrentEvents();
@@ -283,46 +302,51 @@ namespace CyberSentra
             var riskScore = anomalyRate * 0.5 + threatRate * 1.5;
             var index = 100 - (int)(riskScore * 100);
             SecurityIndex = Math.Clamp(index, 0, 100);
+            if (DateTime.UtcNow - _lastMlRunUtc > _mlInterval)
+            {
+                _lastMlRunUtc = DateTime.UtcNow;
+                try
+                {
+                    var history = EventRepository.GetEventsSince(DateTime.UtcNow.AddDays(-7));
 
-           try
-{
-    var history = EventRepository.GetEventsSince(DateTime.UtcNow.AddDays(-7));
+                    var now = DateTime.Now;
+                    var targetStart = now.AddHours(-24);
 
-    var now = DateTime.Now;
-    var targetStart = now.AddHours(-24);
+                    bool TryTime(EventRecord e, out DateTime t) => DateTime.TryParse(e.Time, out t);
 
-    bool TryTime(EventRecord e, out DateTime t) => DateTime.TryParse(e.Time, out t);
+                    // Baseline = everything older than last 24h (within 7 days)
+                    var baselineEvents = history
+                        .Where(e => TryTime(e, out var t) && t < targetStart)
+                        .ToList();
 
-    // Baseline = everything older than last 24h (within 7 days)
-    var baselineEvents = history
-        .Where(e => TryTime(e, out var t) && t < targetStart)
-        .ToList();
+                    // Target = last 24h
+                    var targetEvents = history
+                        .Where(e => TryTime(e, out var t) && t >= targetStart)
+                        .ToList();
 
-    // Target = last 24h
-    var targetEvents = history
-        .Where(e => TryTime(e, out var t) && t >= targetStart)
-        .ToList();
+                    var baselineRows = FeatureBuilder.BuildPerUserHourlyFeatures(baselineEvents, lastHours: 7 * 24);
+                    var targetRows = FeatureBuilder.BuildPerUserHourlyFeatures(targetEvents, lastHours: 24);
 
-    var baselineRows = FeatureBuilder.BuildPerUserHourlyFeatures(baselineEvents, lastHours: 7 * 24);
-    var targetRows   = FeatureBuilder.BuildPerUserHourlyFeatures(targetEvents, lastHours: 24);
+                    Debug.WriteLine($"[ML] history={history.Count}, baselineEvents={baselineEvents.Count}, targetEvents={targetEvents.Count}");
+                    Debug.WriteLine($"[ML] baselineRows={baselineRows.Count}, targetRows={targetRows.Count}");
 
-    Debug.WriteLine($"[ML] history={history.Count}, baselineEvents={baselineEvents.Count}, targetEvents={targetEvents.Count}");
-    Debug.WriteLine($"[ML] baselineRows={baselineRows.Count}, targetRows={targetRows.Count}");
+                    var scored = AnomalyModel.TrainBaselineScoreTarget(baselineRows, targetRows);
+                    var baselineMean = ComputeMean(baselineRows);
+                    var targetMap = targetRows.ToDictionary(r => r.User, r => r);
+                    MlCache.Update(scored, targetMap, baselineMean);
 
-    var scored = AnomalyModel.TrainBaselineScoreTarget(baselineRows, targetRows);
+                    MlAnomalyCount = scored.Count(a => a.IsAnomaly);
 
-    MlAnomalyCount = scored.Count(a => a.IsAnomaly);
-
-    TopAnomalousUsers.Clear();
-    foreach (var a in scored.Take(3))
-        TopAnomalousUsers.Add($"{a.User}  (score: {a.Score:0.000})");
-}
-catch (Exception ex)
-{
-    Debug.WriteLine("[ML] " + ex.Message);
-    MlAnomalyCount = 0;
-}
-
+                    TopAnomalousUsers.Clear();
+                    foreach (var a in scored.Take(3))
+                        TopAnomalousUsers.Add($"{a.User}  (score: {a.Score:0.000})");
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine("[ML] " + ex.Message);
+                    MlAnomalyCount = 0;
+                }
+            }
 
 
 
@@ -389,30 +413,38 @@ catch (Exception ex)
         }
 
 
-        // ===== Timer tick (near real-time refresh) =====
-        //private void Timer_Tick(object? sender, EventArgs e)
-        //{
-        //    DoRefresh();
-        //}
+        // ===== Timer tick(near real-time refresh) =====
+        private async void Timer_Tick(object? sender, EventArgs e)
+        {
+            await DoRefresh();
+        }
+
+
+        private bool _refreshing = false;
 
         private async Task DoRefresh()
         {
-            // Show status while refreshing
-            AppStatus = "Refreshing...";
-            LastLogUpdateText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            if (_refreshing) return;
+            _refreshing = true;
 
-            // Heavy work: reload logs on background thread
-            await Task.Run(() =>
+            try
             {
-                EventSource.Reload();
-            });
+                AppStatus = "Refreshing...";
+                LastLogUpdateText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-            // Back on UI thread: recompute metrics & anomalies from new data
-            InitFromEvents();
-            LoadRecentAnomalies();
+                await Task.Run(() => EventSource.Reload());
 
-            AppStatus = "Running";
+                InitFromEvents();
+                LoadRecentAnomalies();
+
+                AppStatus = "Running";
+            }
+            finally
+            {
+                _refreshing = false;
+            }
         }
+
 
 
 

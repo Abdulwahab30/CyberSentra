@@ -22,6 +22,27 @@ namespace CyberSentra
         private const int SYSMON_FILE_CREATE = 11;
         private const int SYSMON_REG_SET = 13;
 
+
+        private static bool IsUserWritablePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            var p = path.ToLowerInvariant();
+            return p.Contains(@"\users\") &&
+                   (p.Contains(@"\downloads\") || p.Contains(@"\appdata\") || p.Contains(@"\temp\") || p.Contains(@"\desktop\"));
+        }
+
+        private static bool HasSuspiciousCmd(string cmd)
+        {
+            if (string.IsNullOrWhiteSpace(cmd)) return false;
+            var c = cmd.ToLowerInvariant();
+            return c.Contains("encodedcommand") || c.Contains("frombase64string") || c.Contains(" -w hidden") ||
+                   c.Contains("executionpolicy bypass") || c.Contains("invoke-") || c.Contains("downloadstring") ||
+                   c.Contains("http://") || c.Contains("https://");
+        }
+
+
+
+
         // Try to pull "Event ID: 4625" or "EventID 4625" etc. from message text
         private static readonly Regex _eventIdRx =
             new Regex(@"Event\s*ID\s*[:=]?\s*(\d{3,5})|EventID\s*[:=]?\s*(\d{3,5})",
@@ -99,9 +120,9 @@ namespace CyberSentra
                 var src = ev.Source ?? "";
 
                 var isSysmon = LooksSysmon(ev);
-                var eventId = TryGetEventId(ev);
+               // var eventId = TryGetEventId(ev);
                 var user = NormalizeUser(ev);
-
+                var eventId = ev.EventId;
                 // ---------- Rule A: Security 4625 failed logon ----------
                 // Better than searching "failed" only.
                 if (eventId == EVT_FAILED_LOGON ||
@@ -201,46 +222,61 @@ namespace CyberSentra
                 }
 
                 // ---------- Rule F: Sysmon Process Create (EventID 1) ----------
-                if (isSysmon && (eventId == SYSMON_PROCESS_CREATE || ContainsAny(details, "EventID 1", "Process Create")))
+                // Sysmon Process Create
+                if (isSysmon && eventId == 1)
                 {
-                    // Look for LOLBins and common attacker flags
-                    if (ContainsAny(detLower, "powershell", "encodedcommand", "rundll32", "regsvr32", "mshta", "certutil", "bitsadmin"))
+                    var img = ev.Image ?? ev.Process ?? "";
+                    var cmd = ev.CommandLine ?? ev.Details ?? "";
+                    var parent = ev.ParentImage ?? "";
+
+                    // optional: a safe, explicit demo marker
+                    var hasDemoMarker = (cmd?.IndexOf("--cybersentra-demo", StringComparison.OrdinalIgnoreCase) ?? -1) >= 0;
+
+                    bool suspicious =
+                        hasDemoMarker ||
+                        IsUserWritablePath(img) ||
+                        HasSuspiciousCmd(cmd) ||
+                        ContainsAny((img + " " + cmd).ToLowerInvariant(), "rundll32", "regsvr32", "mshta", "certutil", "bitsadmin", "schtasks", "powershell");
+
+                    if (suspicious)
                     {
                         threats.Add(new ThreatInfo
                         {
                             Time = ev.Time,
-                            User = user,
+                            User = NormalizeUser(ev),
                             Source = "Sysmon",
                             Technique = "T1059",
-                            Name = "Sysmon: Suspicious Process Creation",
+                            Name = hasDemoMarker ? "Demo: Suspicious Execution Marker" : "Sysmon: Suspicious Process Execution",
                             Tactic = "Execution",
                             Severity = "High",
-                            Details = details
+                            Details = $"Image: {img}\nParent: {parent}\nCommandLine: {cmd}\n\n{ev.Details}"
                         });
                         continue;
                     }
                 }
 
                 // ---------- Rule G: Sysmon Network Connect (EventID 3) ----------
-                if (isSysmon && (eventId == SYSMON_NETWORK_CONNECT || ContainsAny(details, "EventID 3", "Network connection")))
+                if (isSysmon && eventId == 3)
                 {
-                    // Flag external connections / suspicious tools
-                    if (ContainsAny(detLower, "destinationip", "remote address", "http", "https", "powershell", "rundll32", "mshta"))
+                    var dip = ev.DestinationIp ?? "";
+                    var cmd = ev.CommandLine ?? ev.Details ?? "";
+                    if (!string.IsNullOrWhiteSpace(dip) || cmd.Contains("http", StringComparison.OrdinalIgnoreCase))
                     {
                         threats.Add(new ThreatInfo
                         {
                             Time = ev.Time,
-                            User = user,
+                            User = NormalizeUser(ev),
                             Source = "Sysmon",
                             Technique = "T1071",
-                            Name = "Sysmon: Suspicious Network Connection",
+                            Name = "Sysmon: Network Connection Observed",
                             Tactic = "Command and Control",
                             Severity = "Medium",
-                            Details = details
+                            Details = $"DestinationIp: {dip}\nCommandLine: {cmd}\n\n{ev.Details}"
                         });
                         continue;
                     }
                 }
+
 
                 // ---------- IMPORTANT: remove your old "generic high severity catch-all" ----------
                 // That rule creates tons of false "threats" and ruins the dashboard.

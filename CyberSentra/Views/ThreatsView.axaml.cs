@@ -4,12 +4,15 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Threading;
+using CyberSentra.ML;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 namespace CyberSentra
 {
@@ -36,20 +39,126 @@ namespace CyberSentra
         private string _currentSeverity = "All";
         private string _techniqueFilter = string.Empty;
 
+        private readonly HashSet<string> _notified = new();
+        private static string ThreatKey(ThreatInfo t)
+        {
+            var detailsHash = (t.Details ?? "").GetHashCode();
+            return $"{t.Time}|{t.Technique}|{t.Name}|{t.User}|{detailsHash}";
+        }
+
+        private async void ShowToast(string title, string message)
+        {
+            var toast = new Window
+            {
+                Width = 360,
+                Height = 120,
+                CanResize = false,
+                SystemDecorations = SystemDecorations.None,
+                Topmost = true,
+                Content = new StackPanel
+                {
+                    Margin = new Thickness(12),
+                    Spacing = 6,
+                    Children =
+            {
+                new TextBlock { Text = title, FontWeight = Avalonia.Media.FontWeight.Bold, FontSize = 14 },
+                new TextBlock { Text = message, Opacity = 0.85, TextWrapping = Avalonia.Media.TextWrapping.Wrap }
+            }
+                }
+            };
+
+            // show near top-right of main window
+            var owner = TopLevel.GetTopLevel(this) as Window;
+            if (owner != null)
+            {
+                toast.WindowStartupLocation = WindowStartupLocation.Manual;
+
+                int x = (int)(owner.Position.X + owner.Width - toast.Width - 20);
+                int y = (int)(owner.Position.Y + 40);
+
+                toast.Position = new PixelPoint(x, y);
+                toast.Show(owner);
+            }
+            else
+            {
+                toast.Show();
+            }
+
+            await Task.Delay(3500);
+            toast.Close();
+        }
+
+
+
         public ThreatsView()
         {
             InitializeComponent();
             DataContext = this;
             LoadThreatsFromEvents();
+
+
+
+
         }
 
+        private bool _initialized = false;
+
+        private static float[] ComputeMean(List<UserFeatureRow> rows)
+        {
+            if (rows.Count == 0) return Array.Empty<float>();
+
+            int d = rows[0].Features.Length;
+            var mean = new float[d];
+
+            foreach (var r in rows)
+                for (int i = 0; i < d; i++)
+                    mean[i] += r.Features[i];
+
+            for (int i = 0; i < d; i++)
+                mean[i] /= rows.Count;
+
+            return mean;
+        }
         private void LoadThreatsFromEvents()
         {
             var events = EventContext.GetCurrentEvents();
-            _allThreats = ThreatDetector.GetThreats(events);
+            var ruleThreats = ThreatDetector.GetThreats(events);
+
+            var scored = MlCache.LatestScored;
+            var targetMap = MlCache.LatestTargetMap;
+            var baselineMean = MlCache.LatestBaselineMean;
+
+            var mlThreats = MlThreatBridge.BuildMlThreats(scored, targetMap, baselineMean);
+
+            _allThreats = ruleThreats
+                .Concat(mlThreats)
+                .OrderByDescending(t => DateTime.TryParse(t.Time, out var dt) ? dt : DateTime.MinValue)
+                .ToList();
+
+            if (!_initialized)
+            {
+                foreach (var t in _allThreats)
+                    _notified.Add(ThreatKey(t));
+
+                _initialized = true;
+                ApplyFilter();
+                return;
+            }
+
+
+            var newThreats = _allThreats.Where(t => _notified.Add(ThreatKey(t))).Take(3).ToList();
+            foreach (var t in newThreats)
+                Dispatcher.UIThread.Post(() =>
+                {
+                    ShowToast($"New threat: {t.Name}",
+                              $"{t.User} • {t.Severity} • {t.Technique}");
+                });
+
 
             ApplyFilter();
         }
+
+
 
         private void ApplyFilter()
         {

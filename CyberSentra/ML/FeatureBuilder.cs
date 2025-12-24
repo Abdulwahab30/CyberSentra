@@ -13,6 +13,19 @@ namespace CyberSentra.ML
         // 3 Warnings
         // 4 UniqueProcesses
         // 5 UniqueSources
+
+        private static bool ContainsAny(string haystack, params string[] needles)
+        {
+            if (string.IsNullOrWhiteSpace(haystack)) return false;
+
+            foreach (var n in needles)
+            {
+                if (haystack.Contains(n, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
         public static List<UserFeatureRow> BuildPerUserFeatures(IReadOnlyList<EventRecord> events)
         {
             var grouped = events
@@ -101,7 +114,10 @@ namespace CyberSentra.ML
                 var evs = g.Select(x => x.Event).ToList();
 
                 int total = evs.Count;
-                int failed = evs.Count(e => (e.Details ?? "").Contains("failed", StringComparison.OrdinalIgnoreCase));
+                int failed = evs.Count(e =>
+                     e.Type.Equals("Security", StringComparison.OrdinalIgnoreCase) &&
+                     e.EventId == 4625);
+
                 int errors = evs.Count(e =>
                     (e.Severity ?? "").Equals("Error", StringComparison.OrdinalIgnoreCase) ||
                     (e.Severity ?? "").Contains("Failure", StringComparison.OrdinalIgnoreCase) ||
@@ -111,10 +127,35 @@ namespace CyberSentra.ML
                 int uniqueProc = evs.Select(e => e.Process ?? "").Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Count();
                 int uniqueSrc = evs.Select(e => e.Source ?? "").Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().Count();
 
+
+                int sysmon1 = evs.Count(e => e.Type.Equals("Sysmon", StringComparison.OrdinalIgnoreCase) && e.EventId == 1);
+                int sysmon3 = evs.Count(e => e.Type.Equals("Sysmon", StringComparison.OrdinalIgnoreCase) && e.EventId == 3);
+                int sysmon11 = evs.Count(e => e.Type.Equals("Sysmon", StringComparison.OrdinalIgnoreCase) && e.EventId == 11);
+                int sec4625 = evs.Count(e => e.Type.Equals("Security", StringComparison.OrdinalIgnoreCase) && e.EventId == 4625);
+
+                int lolbin = evs.Count(e =>
+                {
+                    var img = (e.Image ?? e.Process ?? "").ToLowerInvariant();
+                    var cmd = (e.CommandLine ?? e.Details ?? "").ToLowerInvariant();
+                    return ContainsAny(img + " " + cmd, "powershell", "pwsh", "rundll32", "regsvr32", "mshta", "certutil", "bitsadmin", "schtasks", "wmic");
+                });
+
+                int suspCmd = evs.Count(e =>
+                {
+                    var cmd = (e.CommandLine ?? e.Details ?? "").ToLowerInvariant();
+                    return cmd.Contains("encodedcommand") || cmd.Contains("frombase64string") || cmd.Contains("downloadstring") ||
+                           cmd.Contains("executionpolicy bypass") || cmd.Contains(" -w hidden") || cmd.Contains("http://") || cmd.Contains("https://") ||
+                           cmd.Contains("--cybersentra-demo");
+                });
+
                 rows.Add(new UserFeatureRow
                 {
                     User = $"{user} | {g.Key.Bucket:MM-dd HH}:00",
-                    Features = new float[] { total, failed, errors, warnings, uniqueProc, uniqueSrc }
+                    Features = new float[]
+                    {
+                        total, failed, errors, warnings, uniqueProc, uniqueSrc,
+                        sysmon1, sysmon3, lolbin, suspCmd, sec4625, sysmon11
+                    }
                 });
             }
 
